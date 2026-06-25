@@ -34,8 +34,11 @@ rm -f /tmp/serial_ctrl_dev
 rm -f /tmp/hilink_router_ip
 rm -f /tmp/hilink_login_required
 rm -f /tmp/modem_profile
+rm -f /tmp/modem_usb_id
+rm -f /tmp/modem_provider
 rm -f /tmp/modem_iface
 rm -f /tmp/modem_router_ip
+rm -f /tmp/quectel_usbnet_mode
 rm -f /tmp/uavpal_udhcpc.sh
 
 ulogger -s -t uavpal_drone "... removing lock files"

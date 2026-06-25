@@ -21,7 +21,10 @@ if [ "$modem_usb_id" == "" ]; then
 	exit 0
 fi
 modem_vendor=$(echo "$modem_usb_id" | cut -d ':' -f 1)
+modem_provider=$(modem_provider_from_usb_id "$modem_usb_id")
 modem_profile=$(modem_conf_read MODEM_PROFILE "auto")
+echo "$modem_usb_id" >/tmp/modem_usb_id
+echo "$modem_provider" >/tmp/modem_provider
 ulogger -s -t uavpal_drone "USB modem detected (USB ID: ${modem_usb_id}, profile: ${modem_profile})"
 ulogger -s -t uavpal_drone "=== Loading uavpal softmod $(head -1 /data/ftp/uavpal/version.txt |tr -d '\r\n' |tr -d '\n') ==="
 
@@ -142,6 +145,14 @@ do
 			ulogger -s -t uavpal_drone "... starting connection keep-alive handler in background"
 			connection_handler_ethernet "$modem_eth_if" &
 			break 1 # break out of while loop
+		fi
+		if [ "$modem_vendor" == "2c7c" ] && [ -f /tmp/quectel_usbnet_mode ]; then
+			quectel_usbnet_mode=$(cat /tmp/quectel_usbnet_mode)
+			if [ "$quectel_usbnet_mode" != "1" ]; then
+				ulogger -s -t uavpal_drone "... Quectel usbnet mode is ${quectel_usbnet_mode}, not ECM; set AT+QCFG=\"usbnet\",1 and reboot the modem"
+				ulogger -s -t uavpal_drone "... no Ethernet modem interface detected - exiting!"
+				exit 1
+			fi
 		fi
 	fi
 	usleep 100000

@@ -108,6 +108,19 @@ detect_allowed_modem_usb_id()
 	return 1
 }
 
+modem_provider_from_usb_id()
+{
+	usb_id=$(normalize_usb_id "$1")
+	usb_vendor=$(echo "$usb_id" | cut -d ':' -f 1)
+	if [ "$usb_vendor" == "12d1" ]; then
+		echo "huawei"
+	elif [ "$usb_vendor" == "2c7c" ]; then
+		echo "quectel"
+	else
+		echo "generic"
+	fi
+}
+
 at_command_dev()
 {
 	ctrl_dev="$1"
@@ -176,8 +189,10 @@ quectel_prepare()
 	usbnet_string=$(at_command "AT+QCFG=\"usbnet\"" "OK" "1" | grep "QCFG:" | tail -n 1)
 	usbnet_mode=$(echo "$usbnet_string" | cut -d ',' -f 2 | tr -d ' "\r')
 	if [ "$usbnet_mode" == "1" ]; then
+		echo "$usbnet_mode" >/tmp/quectel_usbnet_mode
 		ulogger -s -t uavpal_quectel "... Quectel usbnet mode is ECM"
 	elif [ "$usbnet_mode" != "" ]; then
+		echo "$usbnet_mode" >/tmp/quectel_usbnet_mode
 		ulogger -s -t uavpal_quectel "... Quectel usbnet mode is ${usbnet_mode}; expected 1 for ECM"
 	fi
 
@@ -464,14 +479,23 @@ modem_status_usb8l()
 	if [ "$status_json" == "" ]; then
 		return 1
 	fi
-	mode=$(json_value "$status_json" "technology")
+	mode=$(json_value "$status_json" "statusBarTechnology")
+	if [ "$mode" == "" ]; then
+		mode=$(json_value "$status_json" "statusBarNetwork")
+	fi
+	if [ "$mode" == "" ]; then
+		mode=$(json_value "$status_json" "technology")
+	fi
 	if [ "$mode" == "" ]; then
 		mode=$(json_value "$status_json" "network")
 	fi
 	if [ "$mode" == "" ]; then
 		mode="n/a"
 	fi
-	signalBars=$(json_value "$status_json" "signalBars")
+	signalBars=$(json_value "$status_json" "statusBarSignalBars")
+	if [ "$signalBars" == "" ]; then
+		signalBars=$(json_value "$status_json" "signalBars")
+	fi
 	if [ "$signalBars" == "" ]; then
 		signalBars=$(json_value "$status_json" "signal_bars")
 	fi
@@ -523,10 +547,18 @@ modem_status()
 	elif [ "$modem_profile" == "huawei_stick" ]; then
 		modem_status_huawei_stick
 	else
-		status=$(modem_status_quectel)
-		if [ "$status" != "" ]; then
-			echo "$status"
-			return 0
+		modem_provider=""
+		if [ -f /tmp/modem_provider ]; then
+			modem_provider=$(cat /tmp/modem_provider)
+		elif [ -f /tmp/modem_usb_id ]; then
+			modem_provider=$(modem_provider_from_usb_id "$(cat /tmp/modem_usb_id)")
+		fi
+		if [ "$modem_provider" == "quectel" ]; then
+			status=$(modem_status_quectel)
+			if [ "$status" != "" ]; then
+				echo "$status"
+				return 0
+			fi
 		fi
 		status=$(modem_status_usb8l)
 		if [ "$status" != "" ]; then
