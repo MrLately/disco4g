@@ -15,7 +15,14 @@ serial_ppp_dev="ttyUSB1"
 . /data/ftp/uavpal/bin/uavpal_globalfunctions.sh
 
 # main
-ulogger -s -t uavpal_drone "Huawei USB device detected (USB ID: $(lsusb |grep 12d1 |head -n 1 | cut -d ' ' -f 6))"
+modem_usb_id=$(detect_allowed_modem_usb_id)
+if [ "$modem_usb_id" == "" ]; then
+	ulogger -s -t uavpal_drone "... no supported USB modem found"
+	exit 0
+fi
+modem_vendor=$(echo "$modem_usb_id" | cut -d ':' -f 1)
+modem_profile=$(modem_conf_read MODEM_PROFILE "auto")
+ulogger -s -t uavpal_drone "USB modem detected (USB ID: ${modem_usb_id}, profile: ${modem_profile})"
 ulogger -s -t uavpal_drone "=== Loading uavpal softmod $(head -1 /data/ftp/uavpal/version.txt |tr -d '\r\n' |tr -d '\n') ==="
 
 # set platform, evinrude=Disco, ardrone3=Bebop 2
@@ -55,14 +62,30 @@ insmod /data/ftp/uavpal/mod/${kernel_mods}/ip_tables.ko                 # needed
 insmod /data/ftp/uavpal/mod/${kernel_mods}/iptable_filter.ko            # needed for Disco firmware <=1.4.1 and >=1.7.0 and Bebop 2 firmware >= 4.4.2
 insmod /data/ftp/uavpal/mod/${kernel_mods}/xt_tcpudp.ko                 # needed for Disco firmware <=1.4.1 only
 
-ulogger -s -t uavpal_drone "... running usb_modeswitch to switch Huawei modem into huawei-new-mode"
-/data/ftp/uavpal/bin/usb_modeswitch -v 12d1 -p `lsusb |grep "ID 12d1" | cut -f 3 -d \:` --huawei-new-mode -s 3
+if [ "$modem_vendor" == "12d1" ] && [ "$modem_profile" != "generic_ethernet" ]; then
+	ulogger -s -t uavpal_drone "... running usb_modeswitch to switch Huawei modem into huawei-new-mode"
+	/data/ftp/uavpal/bin/usb_modeswitch -v 12d1 -p `lsusb |grep "ID 12d1" | cut -f 3 -d \:` --huawei-new-mode -s 3
+fi
 
-ulogger -s -t uavpal_drone "... detecting Huawei modem type"
+use_generic_ethernet=0
+if [ "$modem_profile" == "generic_ethernet" ]; then
+	use_generic_ethernet=1
+elif [ "$modem_profile" == "auto" ] && [ "$modem_vendor" != "12d1" ]; then
+	use_generic_ethernet=1
+elif [ "$modem_profile" != "auto" ] && [ "$modem_profile" != "huawei_hilink" ] && [ "$modem_profile" != "huawei_stick" ]; then
+	ulogger -s -t uavpal_drone "... modem profile ${modem_profile} is not supported - exiting!"
+	exit 1
+fi
+
+if [ "$use_generic_ethernet" -eq 1 ] && [ "$modem_vendor" == "2c7c" ]; then
+	quectel_prepare "$modem_usb_id"
+fi
+
+ulogger -s -t uavpal_drone "... detecting modem type"
 while true
 do
 	# -=-=-=-=-= Hi-Link mode =-=-=-=-=-
-	if [ -d "/proc/sys/net/ipv4/conf/${cdc_if}" ]; then
+	if [ "$use_generic_ethernet" -eq 0 ] && [ "$modem_profile" != "huawei_stick" ] && [ -d "/proc/sys/net/ipv4/conf/${cdc_if}" ]; then
 		ulogger -s -t uavpal_drone "... detected Huawei USB modem in Hi-Link mode"
 		ulogger -s -t uavpal_drone "... unloading Stick Mode kernel modules (not required for Hi-Link firmware)"
 		rmmod option
@@ -70,6 +93,7 @@ do
 		rmmod usbserial
 		ulogger -s -t uavpal_drone "... connecting modem to Internet (Hi-Link)"
 		connect_hilink
+		echo huawei_hilink >/tmp/modem_profile
 		ulogger -s -t uavpal_drone "... enabling Hi-Link DMZ mode (1:1 NAT for better zerotier performance)"
 		hilink_api "post" "/api/security/dmz" "<request><DmzStatus>1</DmzStatus><DmzIPAddress>${hilink_ip}</DmzIPAddress></request>"
 		ulogger -s -t uavpal_drone "... setting Hi-Link NAT type full cone (better zerotier performance)"
@@ -85,7 +109,7 @@ do
 		
 	fi
 	# -=-=-=-=-= Stick mode =-=-=-=-=-
-	if [ -c "/dev/${serial_ctrl_dev}" ]; then
+	if [ "$use_generic_ethernet" -eq 0 ] && [ "$modem_profile" != "huawei_hilink" ] && [ -c "/dev/${serial_ctrl_dev}" ]; then
 		ulogger -s -t uavpal_drone "... detected Huawei USB modem in Stick mode"
 		ulogger -s -t uavpal_drone "... loading ppp kernel modules"
 		insmod /data/ftp/uavpal/mod/${kernel_mods}/crc-ccitt.ko
@@ -96,6 +120,7 @@ do
 		insmod /data/ftp/uavpal/mod/${kernel_mods}/bsd_comp.ko
 		ulogger -s -t uavpal_drone "... connecting modem to Internet (ppp)"
 		connect_stick
+		echo huawei_stick >/tmp/modem_profile
 		ulogger -s -t uavpal_drone "... querying Huawei device details via AT command"
 		fhverString=$(at_command "AT\^FHVER" "OK" "1" | grep "FHVER:" | tail -n 1)
 		ulogger -s -t uavpal_drone "... model: $(echo "$fhverString" | cut -d " " -f 1 | cut -d "\"" -f 2), hardware version: $(echo "$fhverString" | cut -d "," -f 2 | cut -d "\"" -f 1)"
@@ -104,6 +129,20 @@ do
 		ulogger -s -t uavpal_drone "... starting connection keep-alive handler in background"
 		connection_handler_stick &
 		break 1 # break out of while loop
+	fi
+	# -=-=-=-=-= Generic Ethernet mode =-=-=-=-=-
+	if [ "$use_generic_ethernet" -eq 1 ]; then
+		modem_eth_if=$(detect_ethernet_iface)
+		if [ "$modem_eth_if" != "" ]; then
+			ulogger -s -t uavpal_drone "... detected USB modem in generic Ethernet mode on ${modem_eth_if}"
+			ulogger -s -t uavpal_drone "... connecting modem to Internet (Ethernet/DHCP)"
+			connect_ethernet "$modem_eth_if"
+			echo generic_ethernet >/tmp/modem_profile
+			firewall ${modem_eth_if}
+			ulogger -s -t uavpal_drone "... starting connection keep-alive handler in background"
+			connection_handler_ethernet "$modem_eth_if" &
+			break 1 # break out of while loop
+		fi
 	fi
 	usleep 100000
 done

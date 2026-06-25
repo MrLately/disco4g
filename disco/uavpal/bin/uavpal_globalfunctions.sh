@@ -56,14 +56,139 @@ conf_read()
 	echo "$result" |tr -d '\r\n' |tr -d '\n'
 }
 
-at_command()
+modem_conf_read()
 {
-	command="$1"
-	expected_response="$2"
-	timeout="$3"
-	result=$(/data/ftp/uavpal/bin/chat -V -t $timeout '' "$command" "$expected_response" '' > /dev/${serial_ctrl_dev} < /dev/${serial_ctrl_dev}) 2>&1
+	key="$1"
+	default_value="$2"
+	conf_file="/data/ftp/uavpal/conf/modem.conf"
+	result=""
+	if [ -f "$conf_file" ]; then
+		result=$(grep "^${key}=" "$conf_file" | tail -n 1 | cut -d '=' -f 2- | cut -d '#' -f 1 | tr -d '\r\n')
+	fi
+	if [ "$result" == "" ]; then
+		result="$default_value"
+	fi
+	echo "$result"
+}
+
+normalize_usb_id()
+{
+	echo "$1" | cut -d '/' -f 1,2 | tr '/' ':' | tr 'A-F' 'a-f'
+}
+
+modem_usb_id_allowed()
+{
+	usb_id=$(normalize_usb_id "$1")
+	usb_vendor=$(echo "$usb_id" | cut -d ':' -f 1)
+	usb_product=$(echo "$usb_id" | cut -d ':' -f 2)
+	allowed_ids=$(modem_conf_read MODEM_USB_IDS "12d1:*")
+
+	for allowed_id in $allowed_ids; do
+		allowed_id=$(normalize_usb_id "$allowed_id")
+		allowed_vendor=$(echo "$allowed_id" | cut -d ':' -f 1)
+		allowed_product=$(echo "$allowed_id" | cut -d ':' -f 2)
+		if [ "$allowed_product" == "$allowed_vendor" ]; then
+			allowed_product="*"
+		fi
+		if [ "$usb_vendor" == "$allowed_vendor" ] && [ "$allowed_product" == "*" -o "$usb_product" == "$allowed_product" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+detect_allowed_modem_usb_id()
+{
+	for usb_id in $(lsusb | awk '{ print $6 }'); do
+		if modem_usb_id_allowed "$usb_id"; then
+			echo "$usb_id"
+			return 0
+		fi
+	done
+	return 1
+}
+
+at_command_dev()
+{
+	ctrl_dev="$1"
+	command="$2"
+	expected_response="$3"
+	timeout="$4"
+	if [ "$ctrl_dev" == "" ] || [ ! -c "/dev/${ctrl_dev}" ]; then
+		ulogger -s -t uavpal_at_command "... AT control device ${ctrl_dev} is not available"
+		return 1
+	fi
+	result=$(/data/ftp/uavpal/bin/chat -V -t $timeout '' "$command" "$expected_response" '' > /dev/${ctrl_dev} < /dev/${ctrl_dev}) 2>&1
 	if [ "$?" -ne "0" ]; then ulogger -s -t uavpal_at_command "... Did not receive expected output from AT command $command"; fi
 	echo "$result"
+}
+
+at_command()
+{
+	at_command_dev "$serial_ctrl_dev" "$1" "$2" "$3"
+}
+
+find_quectel_at_port()
+{
+	for ctrl_dev in ttyUSB2 ttyUSB0 ttyUSB1 ttyUSB3 ttyUSB4 ttyUSB5; do
+		if [ -c "/dev/${ctrl_dev}" ]; then
+			at_result=$(at_command_dev "$ctrl_dev" "AT" "OK" "1")
+			if echo "$at_result" | grep "OK" >/dev/null; then
+				echo "$ctrl_dev"
+				return 0
+			fi
+		fi
+	done
+	return 1
+}
+
+quectel_prepare()
+{
+	usb_id=$(normalize_usb_id "$1")
+	usb_vendor=$(echo "$usb_id" | cut -d ':' -f 1)
+	usb_product=$(echo "$usb_id" | cut -d ':' -f 2)
+
+	if [ ! -c /dev/ttyUSB0 ]; then
+		for option_driver in option1 option; do
+			if [ -e /sys/bus/usb-serial/drivers/${option_driver}/new_id ]; then
+				ulogger -s -t uavpal_quectel "... binding Quectel ${usb_id} to ${option_driver} driver for AT access"
+				(echo "${usb_vendor} ${usb_product}" > /sys/bus/usb-serial/drivers/${option_driver}/new_id) 2>/dev/null
+				sleep 1
+				break
+			fi
+		done
+	fi
+
+	quectel_ctrl_dev=$(find_quectel_at_port)
+	if [ "$quectel_ctrl_dev" == "" ]; then
+		ulogger -s -t uavpal_quectel "... Quectel AT port not ready, continuing with Ethernet startup"
+		return 0
+	fi
+
+	serial_ctrl_dev="$quectel_ctrl_dev"
+	echo "$serial_ctrl_dev" >/tmp/serial_ctrl_dev
+
+	quectel_model=$(at_command "AT+GMM" "OK" "1" | grep -v "AT+GMM" | grep -v "OK" | tail -n 1 | tr -d '\r')
+	if [ "$quectel_model" != "" ]; then
+		ulogger -s -t uavpal_quectel "... model: ${quectel_model}"
+	fi
+
+	usbnet_string=$(at_command "AT+QCFG=\"usbnet\"" "OK" "1" | grep "QCFG:" | tail -n 1)
+	usbnet_mode=$(echo "$usbnet_string" | cut -d ',' -f 2 | tr -d ' "\r')
+	if [ "$usbnet_mode" == "1" ]; then
+		ulogger -s -t uavpal_quectel "... Quectel usbnet mode is ECM"
+	elif [ "$usbnet_mode" != "" ]; then
+		ulogger -s -t uavpal_quectel "... Quectel usbnet mode is ${usbnet_mode}; expected 1 for ECM"
+	fi
+
+	quectel_network=$(at_command "AT+QNWINFO" "OK" "1" | grep "QNWINFO:" | tail -n 1 | tr -d '\r')
+	if [ "$quectel_network" != "" ]; then
+		ulogger -s -t uavpal_quectel "... network: ${quectel_network}"
+	fi
+	quectel_cell=$(at_command "AT+QENG=\"servingcell\"" "OK" "1" | grep "QENG:" | tail -n 1 | tr -d '\r')
+	if [ "$quectel_cell" != "" ]; then
+		ulogger -s -t uavpal_quectel "... serving cell: ${quectel_cell}"
+	fi
 }
 
 send_message()
@@ -79,8 +204,12 @@ send_message()
 	phone_no="$(conf_read phonenumber)"
 	if [ "$phone_no" != "+XXYYYYYYYYY" ]; then
 		if [ ! -f "/tmp/hilink_router_ip" ]; then
-			ulogger -s -t uavpal_send_message "... sending SMS to ${phone_no} (via ${serial_ctrl_dev})"
-			at_command "AT+CMGF=1\rAT+CMGS=\"${phone_no}\"\r${1}\32" "OK" "2"
+			if [ "$serial_ctrl_dev" != "" ] && [ -c "/dev/${serial_ctrl_dev}" ]; then
+				ulogger -s -t uavpal_send_message "... sending SMS to ${phone_no} (via ${serial_ctrl_dev})"
+				at_command "AT+CMGF=1\rAT+CMGS=\"${phone_no}\"\r${1}\32" "OK" "2"
+			else
+				ulogger -s -t uavpal_send_message "... SMS is not available for the current modem"
+			fi
 		else
 			ulogger -s -t uavpal_send_message "... sending SMS to ${phone_no} (via Hi-Link API)"
 			hilink_api "post" "/api/sms/send-sms" "<request><Index>-1</Index><Phones><Phone>${phone_no}</Phone></Phones><Sca></Sca><Content>${1}</Content><Length>-1</Length><Reserved>-1</Reserved><Date>-1</Date></request>"
@@ -135,6 +264,81 @@ connect_stick()
 	echo $serial_ctrl_dev >/tmp/serial_ctrl_dev
 }
 
+detect_ethernet_iface()
+{
+	configured_iface=$(modem_conf_read MODEM_ETH_IFACE "")
+	if [ "$configured_iface" != "" ]; then
+		for i in $(seq 1 100); do
+			if [ -d "/proc/sys/net/ipv4/conf/${configured_iface}" ]; then
+				echo "$configured_iface"
+				return 0
+			fi
+			usleep 100000
+		done
+		return 1
+	fi
+
+	for i in $(seq 1 100); do
+		for iface_path in /proc/sys/net/ipv4/conf/eth* /proc/sys/net/ipv4/conf/usb* /proc/sys/net/ipv4/conf/wwan* /proc/sys/net/ipv4/conf/enx*; do
+			if [ ! -d "$iface_path" ]; then
+				continue
+			fi
+			iface=$(basename "$iface_path")
+			if [ "$iface" == "eth0" ]; then
+				continue
+			fi
+			echo "$iface"
+			return 0
+		done
+		usleep 100000
+	done
+	return 1
+}
+
+connect_ethernet()
+{
+	modem_if="$1"
+	dhcp_script="/tmp/uavpal_udhcpc.sh"
+
+	ulogger -s -t uavpal_connect_ethernet "... bringing up Ethernet modem interface ${modem_if}"
+	ifconfig ${modem_if} up
+	rm -f /tmp/modem_router_ip
+
+	cat >$dhcp_script <<'EOF'
+#!/bin/sh
+if [ "$1" == "bound" ] || [ "$1" == "renew" ]; then
+	ifconfig "$interface" "$ip" netmask "$subnet"
+	for router_ip in $router; do
+		ip route add default via "$router_ip" dev "$interface" 2>/dev/null
+		echo "$router_ip" >/tmp/modem_router_ip
+		break
+	done
+fi
+EOF
+	chmod +x $dhcp_script
+
+	ulogger -s -t uavpal_connect_ethernet "... requesting IP address from modem's DHCP server"
+	dhcp_result=$(udhcpc -i ${modem_if} -n -t 10 -s $dhcp_script 2>&1)
+	if [ "$?" -ne "0" ]; then
+		ulogger -s -t uavpal_connect_ethernet "... DHCP did not complete on ${modem_if}: ${dhcp_result}"
+	fi
+
+	if [ ! -f /tmp/modem_router_ip ]; then
+		modem_ip=$(echo "$dhcp_result" | grep obtained | awk '{ print $4 }')
+		if [ "$modem_ip" != "" ]; then
+			modem_router_ip=$(echo `echo $modem_ip | cut -d '.' -f 1,2,3`.1)
+			ifconfig ${modem_if} ${modem_ip} netmask 255.255.255.0
+			ip route add default via ${modem_router_ip} dev ${modem_if} 2>/dev/null
+			echo $modem_router_ip >/tmp/modem_router_ip
+		fi
+	fi
+
+	if [ -f /tmp/modem_router_ip ]; then
+		ulogger -s -t uavpal_connect_ethernet "... default gateway is $(cat /tmp/modem_router_ip)"
+	fi
+	echo $modem_if >/tmp/modem_iface
+}
+
 connection_handler_hilink()
 {
 	while true; do
@@ -168,6 +372,169 @@ connection_handler_stick()
 		fi
 		sleep 5
 	done
+}
+
+connection_handler_ethernet()
+{
+	modem_if="$1"
+	while true; do
+		check_connection
+		if [ $? -ne 0 ]; then
+			ulogger -s -t uavpal_connection_handler_ethernet "... Internet connection lost, trying to reconnect"
+			killall -9 udhcpc
+			ifconfig ${modem_if} down
+			if [ -f /tmp/modem_router_ip ]; then
+				ip route del default via $(cat /tmp/modem_router_ip) 2>/dev/null
+			fi
+			sleep 1
+			connect_ethernet "$modem_if"
+		fi
+		sleep 5
+	done
+}
+
+modem_signal_from_csq()
+{
+	signal_rssi="$1"
+	case "$signal_rssi" in
+		''|*[!0-9]*) echo "n/a"; return 0 ;;
+	esac
+	if [ "$signal_rssi" -ge 0 ] && [ "$signal_rssi" -le 31 ]; then
+		signal_percentage=$(printf "%.0f\n" $(/data/ftp/uavpal/bin/dc -e "$signal_rssi 1 + 3.13 * p"))
+		echo "${signal_percentage}%"
+	else
+		echo "n/a"
+	fi
+}
+
+json_value()
+{
+	echo "$1" | tr '{},' '\n' | grep "\"$2\"" | head -n 1 | cut -d ':' -f 2- | sed 's/^[ 	"]*//;s/[ 	",}]*$//'
+}
+
+modem_status_huawei_stick()
+{
+	modeString=$(at_command "AT\^SYSINFOEX" "OK" "1" | grep "SYSINFOEX:" | tail -n 1)
+	modeNum=`echo $modeString | cut -d "," -f 8`
+	case "$modeNum" in
+		''|*[!0-9]*) modeNum=0 ;;
+	esac
+	if [ $modeNum -ge 101 ]; then
+		mode="4G"
+	elif [ $modeNum -ge 23 ] && [ $modeNum -le 65 ]; then
+		mode="3G"
+	elif [ $modeNum -ge 1 ] && [ $modeNum -le 3 ]; then
+		mode="2G"
+	else
+		mode="n/a"
+	fi
+	signalString=$(at_command "AT+CSQ" "OK" "1" | grep "CSQ:" | tail -n 1)
+	signalRSSI=`echo $signalString | awk '{print $2}' | cut -d ',' -f 1`
+	signalPercentage=$(modem_signal_from_csq "$signalRSSI")
+	echo "$mode/$signalPercentage"
+}
+
+modem_status_hilink()
+{
+	modeStr=$(hilink_api "get" "/api/device/information" | xmllint --xpath 'string(//workmode)' -)
+	if [ "$modeStr" == "LTE" ]; then
+		mode="4G"
+	elif [ "$modeStr" == "WCDMA" ]; then
+		mode="3G"
+	elif [ "$modeStr" == "GSM" ]; then
+		mode="2G"
+	else
+		mode="n/a"
+	fi
+	signalBars=$(hilink_api "get" "/api/monitoring/status" | xmllint --xpath 'string(//SignalIcon)' -)
+	case "$signalBars" in
+		''|*[!0-9]*) signalBars="" ;;
+	esac
+	if [ "$signalBars" != "" ]; then
+		signalPercentage=$(echo "$signalBars 20 * p" | /data/ftp/uavpal/bin/dc)%
+	else
+		signalPercentage="n/a"
+	fi
+	echo "$mode/$signalPercentage"
+}
+
+modem_status_usb8l()
+{
+	status_json=$(/data/ftp/uavpal/bin/curl -s --connect-timeout 1 --max-time 2 "http://192.168.1.1/srv/status" 2>/dev/null)
+	if [ "$status_json" == "" ]; then
+		return 1
+	fi
+	mode=$(json_value "$status_json" "technology")
+	if [ "$mode" == "" ]; then
+		mode=$(json_value "$status_json" "network")
+	fi
+	if [ "$mode" == "" ]; then
+		mode="n/a"
+	fi
+	signalBars=$(json_value "$status_json" "signalBars")
+	if [ "$signalBars" == "" ]; then
+		signalBars=$(json_value "$status_json" "signal_bars")
+	fi
+	case "$signalBars" in
+		''|*[!0-9]*) signalBars="" ;;
+	esac
+	if [ "$signalBars" != "" ] && [ "$signalBars" -ge 0 ] && [ "$signalBars" -le 5 ]; then
+		signalPercentage=$(echo "$signalBars 20 * p" | /data/ftp/uavpal/bin/dc)%
+	else
+		signalPercentage="n/a"
+	fi
+	echo "$mode/$signalPercentage"
+}
+
+modem_status_quectel()
+{
+	if [ "$serial_ctrl_dev" == "" ] || [ ! -c "/dev/${serial_ctrl_dev}" ]; then
+		serial_ctrl_dev=$(find_quectel_at_port)
+		if [ "$serial_ctrl_dev" == "" ]; then
+			return 1
+		fi
+		echo "$serial_ctrl_dev" >/tmp/serial_ctrl_dev
+	fi
+	qnwinfo=$(at_command "AT+QNWINFO" "OK" "1" | grep "QNWINFO:" | tail -n 1)
+	mode=$(echo "$qnwinfo" | cut -d '"' -f 2)
+	if [ "$mode" == "" ]; then
+		mode="n/a"
+	fi
+	signalString=$(at_command "AT+CSQ" "OK" "1" | grep "CSQ:" | tail -n 1)
+	signalRSSI=`echo $signalString | awk '{print $2}' | cut -d ',' -f 1`
+	signalPercentage=$(modem_signal_from_csq "$signalRSSI")
+	echo "$mode/$signalPercentage"
+}
+
+modem_status()
+{
+	if [ -f /tmp/modem_profile ]; then
+		modem_profile=$(cat /tmp/modem_profile)
+	elif [ -f /tmp/hilink_router_ip ]; then
+		modem_profile="huawei_hilink"
+	elif [ -f /tmp/serial_ctrl_dev ]; then
+		modem_profile="huawei_stick"
+	else
+		modem_profile="generic_ethernet"
+	fi
+
+	if [ "$modem_profile" == "huawei_hilink" ]; then
+		modem_status_hilink
+	elif [ "$modem_profile" == "huawei_stick" ]; then
+		modem_status_huawei_stick
+	else
+		status=$(modem_status_quectel)
+		if [ "$status" != "" ]; then
+			echo "$status"
+			return 0
+		fi
+		status=$(modem_status_usb8l)
+		if [ "$status" != "" ]; then
+			echo "$status"
+			return 0
+		fi
+		echo "n/a/n/a"
+	fi
 }
 
 check_connection()

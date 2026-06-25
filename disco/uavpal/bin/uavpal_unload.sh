@@ -5,7 +5,7 @@ if [ $usbmodeswitchStatus -ne 0 ]; then
 	exit 0  # ignoring "removal" event while usb_modesswitch is running
 fi
 
-ulogger -s -t uavpal_drone "Huawei USB device disconnected"
+ulogger -s -t uavpal_drone "USB modem disconnected"
 ulogger -s -t uavpal_drone "... unloading scripts and daemons"
 killall -9 uavpal_disco.sh
 killall -9 uavpal_bebop2.sh
@@ -22,12 +22,21 @@ ulogger -s -t uavpal_drone "... clearing iptables rules"
 iptables -F INPUT
 
 ulogger -s -t uavpal_drone "... clearing default route"
-ip route del default via $(cat /tmp/hilink_router_ip)
+if [ -f /tmp/hilink_router_ip ]; then
+	ip route del default via $(cat /tmp/hilink_router_ip) 2>/dev/null
+fi
+if [ -f /tmp/modem_router_ip ]; then
+	ip route del default via $(cat /tmp/modem_router_ip) 2>/dev/null
+fi
 
 ulogger -s -t uavpal_drone "... removing temp files"
-rm /tmp/serial_ctrl_dev
-rm /tmp/hilink_router_ip
-rm /tmp/hilink_login_required
+rm -f /tmp/serial_ctrl_dev
+rm -f /tmp/hilink_router_ip
+rm -f /tmp/hilink_login_required
+rm -f /tmp/modem_profile
+rm -f /tmp/modem_iface
+rm -f /tmp/modem_router_ip
+rm -f /tmp/uavpal_udhcpc.sh
 
 ulogger -s -t uavpal_drone "... removing lock files"
 rm /tmp/lock/uavpal_disco
