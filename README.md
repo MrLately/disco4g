@@ -99,11 +99,11 @@ Experimental support is available for USB modems that expose a normal Ethernet i
 
 ```
 MODEM_PROFILE=auto
-MODEM_USB_IDS=12d1:*
+MODEM_USB_IDS=12d1:* 2c7c:* 1199:* 1410:*
 MODEM_ETH_IFACE=
 ```
 
-For a generic Ethernet modem, add the modem USB ID to `MODEM_USB_IDS` and set `MODEM_PROFILE=generic_ethernet`. `MODEM_ETH_IFACE` can be left empty to auto-detect `eth*`, `usb*`, `wwan*`, and `enx*` interfaces, excluding `eth0`.
+For another generic Ethernet modem, add its USB ID to `MODEM_USB_IDS` and set `MODEM_PROFILE=generic_ethernet` if auto-detection is not enough. `MODEM_ETH_IFACE` can be left empty to auto-detect `eth*`, `usb*`, `wwan*`, and `enx*` interfaces, excluding `eth0`.
 
 Proof-of-concept testing has worked with an Inseego USB8L and a Quectel RM520N-GL in ECM mode. A Quectel RM502Q-AE is expected to work if it exposes ECM and enumerates as `2c7c:*`. Quectel modules must be switched to ECM on the bench before flight testing:
 
