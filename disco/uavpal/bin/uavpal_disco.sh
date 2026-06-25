@@ -85,6 +85,7 @@ if [ "$use_generic_ethernet" -eq 1 ] && [ "$modem_vendor" == "2c7c" ]; then
 fi
 
 ulogger -s -t uavpal_drone "... detecting modem type"
+generic_ethernet_attempts=0
 while true
 do
 	# -=-=-=-=-= Hi-Link mode =-=-=-=-=-
@@ -146,6 +147,7 @@ do
 			connection_handler_ethernet "$modem_eth_if" &
 			break 1 # break out of while loop
 		fi
+		generic_ethernet_attempts=$(($generic_ethernet_attempts + 1))
 		if [ "$modem_vendor" == "2c7c" ] && [ -f /tmp/quectel_usbnet_mode ]; then
 			quectel_usbnet_mode=$(cat /tmp/quectel_usbnet_mode)
 			if [ "$quectel_usbnet_mode" != "1" ]; then
@@ -153,6 +155,10 @@ do
 				ulogger -s -t uavpal_drone "... no Ethernet modem interface detected - exiting!"
 				exit 1
 			fi
+		fi
+		if [ "$generic_ethernet_attempts" -ge 6 ]; then
+			ulogger -s -t uavpal_drone "... no Ethernet modem interface detected after 60 seconds - exiting!"
+			exit 1
 		fi
 	fi
 	usleep 100000

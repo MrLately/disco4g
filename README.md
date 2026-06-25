@@ -99,7 +99,7 @@ Experimental support is available for USB modems that expose a normal Ethernet i
 
 ```
 MODEM_PROFILE=auto
-MODEM_USB_IDS=12d1:* 2c7c:* 1199:* 1410:*
+MODEM_USB_IDS=12d1:* 19d2:* 2c7c:* 1199:* 2dee:* 05c6:* 1bc7:* 413c:* 1410:*
 MODEM_ETH_IFACE=
 ```
 
