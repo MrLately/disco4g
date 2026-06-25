@@ -107,6 +107,8 @@ For another generic Ethernet modem, add its USB ID to `MODEM_USB_IDS`. `MODEM_ET
 
 Huawei HiLink or Stick users should set `MODEM_PROFILE=auto`, `MODEM_PROFILE=huawei_hilink`, or `MODEM_PROFILE=huawei_stick` as appropriate.
 
+Generic Ethernet modems must already expose a normal DHCP Ethernet interface. APN and carrier setup is modem-side; this support does not configure APNs, QMI, MBIM, PPP, band locking, or modem provisioning for generic Ethernet modems.
+
 Proof-of-concept testing has worked with an Inseego USB8L and a Quectel RM520N-GL in ECM mode. A Quectel RM502Q-AE is expected to work if it exposes ECM and enumerates as `2c7c:*`. Quectel modules must be switched to ECM on the bench before flight testing:
 
 ```
@@ -114,7 +116,11 @@ AT+QCFG="usbnet",1
 AT+CFUN=1,1
 ```
 
-This support does not configure APNs, band locking, QMI, or MBIM. Generic Ethernet modems may show `n/a` signal in Glympse unless status is available through the USB8L `http://192.168.1.1/srv/status` endpoint or a Quectel AT port.
+Troubleshooting:
+- No modem detected: check that the modem's USB ID is listed in `MODEM_USB_IDS`.
+- Quectel detected but no Ethernet interface appears: set ECM mode with `AT+QCFG="usbnet",1`, then reboot with `AT+CFUN=1,1`.
+- Ethernet exists but there is no Internet: check the modem APN/carrier configuration and DHCP gateway.
+- Glympse signal shows `n/a`: modem status is only available through supported status paths such as USB8L `http://192.168.1.1/srv/status` or Quectel AT.
 
 - USB OTG cable (Micro USB 2.0 Male to USB 2.0 Female, ca. 15 cm, angle cable) <details><summary>**Buy now!**</summary>
    [Order from AliExpress ~US$2.00](http://s.click.aliexpress.com/e/caih4r5I) (choose "direction up")\
