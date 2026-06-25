@@ -94,6 +94,26 @@ or
 
 :warning: **Note**: the newer E3372h-**320** model does not work with the softmod currently. Some sellers on Amazon advertise the E3372h-320 as E3372h-153! 
 
+### Generic Ethernet USB modems
+Experimental support is available for USB modems that expose a normal Ethernet interface and provide DHCP. The default `disco/uavpal/conf/modem.conf` keeps the original Huawei-only behavior:
+
+```
+MODEM_PROFILE=auto
+MODEM_USB_IDS=12d1:*
+MODEM_ETH_IFACE=
+```
+
+For a generic Ethernet modem, add the modem USB ID to `MODEM_USB_IDS` and set `MODEM_PROFILE=generic_ethernet`. `MODEM_ETH_IFACE` can be left empty to auto-detect `eth*`, `usb*`, `wwan*`, and `enx*` interfaces, excluding `eth0`.
+
+Proof-of-concept testing has worked with an Inseego USB8L and a Quectel RM520N-GL in ECM mode. A Quectel RM502Q-AE is expected to work if it exposes ECM and enumerates as `2c7c:*`. Quectel modules must be switched to ECM on the bench before flight testing:
+
+```
+AT+QCFG="usbnet",1
+AT+CFUN=1,1
+```
+
+This support does not configure APNs, band locking, QMI, or MBIM. Generic Ethernet modems may show `n/a` signal in Glympse unless status is available through the USB8L `http://192.168.1.1/srv/status` endpoint or a Quectel AT port.
+
 - USB OTG cable (Micro USB 2.0 Male to USB 2.0 Female, ca. 15 cm, angle cable) <details><summary>**Buy now!**</summary>
    [Order from AliExpress ~US$2.00](http://s.click.aliexpress.com/e/caih4r5I) (choose "direction up")\
    [Order fom Amazon ~US$14.00](https://amzn.to/2I4SSzC) (choose 15 cm)
