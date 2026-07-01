@@ -65,6 +65,11 @@ function calc_volt()
         bat_volts=$(printf "%d.%02d" $(($val / 1000)) $(($val % 1000 / 10)))
 }
 
+function glympse_curl()
+{
+	/data/ftp/uavpal/bin/curl -q -k --connect-timeout 3 --max-time 8 "$@"
+}
+
 # main
 ulogger -s -t uavpal_glympse "... reading Glympse API key from config file"
 apikey="$(conf_read glympse_apikey)"
@@ -77,22 +82,22 @@ ulogger -s -t uavpal_glympse "... reading drone ID from avahi"
 droneName=$(cat /tmp/avahi/services/ardiscovery.service |grep name |cut -d '>' -f 2 |cut -d '<' -f 0)
 
 ulogger -s -t uavpal_glympse "... Glympse API: creating account"
-glympseCreateAccount=$(/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -X POST "https://api.glympse.com/v2/account/create?api_key=${apikey}")
+glympseCreateAccount=$(glympse_curl -H "Content-Type: application/json" -X POST "https://api.glympse.com/v2/account/create?api_key=${apikey}")
 
 ulogger -s -t uavpal_glympse "... Glympse API: logging in"
-glympseLogin=$(/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -X POST "https://api.glympse.com/v2/account/login?api_key=${apikey}&id=$(parse_json $glympseCreateAccount id)&password=$(parse_json $glympseCreateAccount password)")
+glympseLogin=$(glympse_curl -H "Content-Type: application/json" -X POST "https://api.glympse.com/v2/account/login?api_key=${apikey}&id=$(parse_json $glympseCreateAccount id)&password=$(parse_json $glympseCreateAccount password)")
 
 ulogger -s -t uavpal_glympse "... Glympse API: parsing access token"
 access_token=$(parse_json $(echo $glympseLogin |sed 's/\:\"access_token/\:\"tmp/g') access_token)
 
 ulogger -s -t uavpal_glympse "... Glympse API: creating ticket"
-glympseCreateTicket=$(/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST "https://api.glympse.com/v2/users/self/create_ticket?duration=14400000")
+glympseCreateTicket=$(glympse_curl -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST "https://api.glympse.com/v2/users/self/create_ticket?duration=14400000")
 
 ulogger -s -t uavpal_glympse "... Glympse API: parsing ticket"
 ticket=$(parse_json $glympseCreateTicket id)
 
 ulogger -s -t uavpal_glympse "... Glympse API: creating invite"
-glympseCreateInvite=$(/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST "https://api.glympse.com/v2/tickets/$ticket/create_invite?type=sms&address=1234567890&send=client")
+glympseCreateInvite=$(glympse_curl -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST "https://api.glympse.com/v2/tickets/$ticket/create_invite?type=sms&address=1234567890&send=client")
 
 ulogger -s -t uavpal_glympse "... Glympse link generated: https://glympse.com/$(parse_json ${glympseCreateInvite% *} id)"
 
@@ -108,7 +113,7 @@ elif [ "$platform" == "ardrone3" ]; then
 	# Parrot Bebop 2
 	tn_filename="bebop2.png"
 fi
-/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[{\"t\": $(date +%s)000, \"pid\": 0, \"n\": \"avatar\", \"v\": \"https://uavpal.com/img/${tn_filename}?$(date +%s)\"}]" "https://api.glympse.com/v2/tickets/$ticket/append_data"
+glympse_curl -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[{\"t\": $(date +%s)000, \"pid\": 0, \"n\": \"avatar\", \"v\": \"https://uavpal.com/img/${tn_filename}?$(date +%s)\"}]" "https://api.glympse.com/v2/tickets/$ticket/append_data"
 
 ztVersion=$(/data/ftp/uavpal/bin/zerotier-one -v)
 
@@ -182,8 +187,8 @@ do
 	droneLabel="${droneName} (${signal} ${altitude_rel}m ${bat_volts}V/${bat_percent}% ${temp} ${latency}${ztConn})"
 	ulogger -s -t uavpal_glympse "... updating Glympse label ($(date +%Y-%m-%d-%H:%M:%S)): $droneLabel"
 
-	/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[[$(date +%s)000,$(gpsDecimal $lat $latdir),$(gpsDecimal $long $longdir),$speed,$heading]]" "https://api.glympse.com/v2/tickets/$ticket/append_location" &
-	/data/ftp/uavpal/bin/curl -q -k -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[{\"t\": $(date +%s)000, \"pid\": 0, \"n\": \"name\", \"v\": \"${droneLabel}\"}]" "https://api.glympse.com/v2/tickets/$ticket/append_data" &
+	glympse_curl -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[[$(date +%s)000,$(gpsDecimal $lat $latdir),$(gpsDecimal $long $longdir),$speed,$heading]]" "https://api.glympse.com/v2/tickets/$ticket/append_location" &
+	glympse_curl -H "Content-Type: application/json" -H "Authorization: Bearer ${access_token}" -X POST -d "[{\"t\": $(date +%s)000, \"pid\": 0, \"n\": \"name\", \"v\": \"${droneLabel}\"}]" "https://api.glympse.com/v2/tickets/$ticket/append_data" &
 
 	if test -n "$ip_sc2"; then
 		ping -c 1 $ip_sc2 |grep 'bytes from' | cut -d '=' -f 4 | tr -d ' ms' > /tmp/sc2ping &
@@ -192,6 +197,9 @@ do
 	fi
 	sleep 5
 	# make sure all curl processes have ended
-	while ps |grep curl |grep -v grep >/dev/null; do usleep 100000; done
+	curl_wait_loops=0
+	while ps |grep curl |grep -v grep >/dev/null && [ "$curl_wait_loops" -lt "80" ]; do
+		curl_wait_loops=$(($curl_wait_loops + 1))
+		usleep 100000
+	done
 done
-

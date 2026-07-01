@@ -71,6 +71,8 @@ modem_conf_read()
 	echo "$result"
 }
 
+MODEM_LOW_LATENCY_TXQLEN=$(modem_conf_read MODEM_LOW_LATENCY_TXQLEN "100")
+
 normalize_usb_id()
 {
 	echo "$1" | cut -d '/' -f 1,2 | tr '/' ':' | tr 'A-F' 'a-f'
@@ -310,48 +312,201 @@ detect_ethernet_iface()
 	return 1
 }
 
+list_network_ifaces()
+{
+	awk -F ':' 'NR>2 { gsub(/ /, "", $1); if ($1 != "") print $1 }' /proc/net/dev
+}
+
+apply_low_latency_queue()
+{
+	iface="$1"
+	target_qlen="$2"
+
+	[ -n "$iface" ] || return 1
+	[ -d "/proc/sys/net/ipv4/conf/${iface}" ] || return 1
+
+	case "$target_qlen" in
+	'' | *[!0-9]*)
+		return 1
+		;;
+	*)
+		;;
+	esac
+	[ "$target_qlen" -gt 0 ] || return 0
+
+	current_qlen=$(ifconfig "${iface}" 2>/dev/null | sed -n 's/.*txqueuelen:\([0-9][0-9]*\).*/\1/p' | head -n 1)
+	if [ -z "$current_qlen" ]; then
+		current_qlen=$(ip link show "${iface}" 2>/dev/null | sed -n 's/.*qlen \([0-9][0-9]*\).*/\1/p' | head -n 1)
+	fi
+
+	# Only reduce oversized queues. Never raise small queues such as PPP defaults.
+	if [ -n "$current_qlen" ] && [ "$current_qlen" -le "$target_qlen" ]; then
+		echo "ok=1 iface=${iface} qlen=${current_qlen} ts=$(date +%s)" >/tmp/uavpal_queue_diag
+		return 0
+	fi
+
+	if ifconfig "${iface}" txqueuelen "${target_qlen}" >/dev/null 2>&1; then
+		echo "ok=1 iface=${iface} qlen=${target_qlen} ts=$(date +%s)" >/tmp/uavpal_queue_diag
+		ulogger -s -t uavpal_queue "... set ${iface} txqueuelen=${target_qlen} (was ${current_qlen:-unknown})"
+		return 0
+	fi
+	if ip link set dev "${iface}" txqueuelen "${target_qlen}" >/dev/null 2>&1; then
+		echo "ok=1 iface=${iface} qlen=${target_qlen} ts=$(date +%s)" >/tmp/uavpal_queue_diag
+		ulogger -s -t uavpal_queue "... set ${iface} txqueuelen=${target_qlen} (was ${current_qlen:-unknown})"
+		return 0
+	fi
+
+	echo "ok=0 iface=${iface} qlen=${target_qlen} ts=$(date +%s)" >/tmp/uavpal_queue_diag
+	return 1
+}
+
+apply_low_latency_queues()
+{
+	case "$MODEM_LOW_LATENCY_TXQLEN" in
+	'' | *[!0-9]*)
+		return 0
+		;;
+	*)
+		;;
+	esac
+	[ "$MODEM_LOW_LATENCY_TXQLEN" -gt 0 ] || return 0
+
+	if [ -n "$cdc_if" ]; then
+		apply_low_latency_queue "$cdc_if" "$MODEM_LOW_LATENCY_TXQLEN"
+	fi
+	if [ -n "$ppp_if" ]; then
+		apply_low_latency_queue "$ppp_if" "$MODEM_LOW_LATENCY_TXQLEN"
+	fi
+	if [ -f /tmp/modem_iface ]; then
+		apply_low_latency_queue "$(cat /tmp/modem_iface 2>/dev/null)" "$MODEM_LOW_LATENCY_TXQLEN"
+	fi
+	for iface in $(list_network_ifaces); do
+		case "$iface" in
+		zt*)
+			apply_low_latency_queue "$iface" "$MODEM_LOW_LATENCY_TXQLEN"
+			;;
+		esac
+	done
+}
+
+ensure_ethernet_default_route()
+{
+	route_iface="$1"
+	route_gateway="$2"
+
+	if [ -z "$route_gateway" ] && [ -f /tmp/modem_gateway_ip ]; then
+		route_gateway=$(head -1 /tmp/modem_gateway_ip | tr -d '\r\n' | tr -d '\n')
+	fi
+	if [ -z "$route_iface" ] || [ -z "$route_gateway" ]; then
+		echo "ok=0 iface=${route_iface} gateway=${route_gateway} ts=$(date +%s)" >/tmp/uavpal_route_diag
+		return 1
+	fi
+
+	if ip route 2>/dev/null | awk -v dev="$route_iface" -v gw="$route_gateway" '$1=="default" && $3==gw && $5==dev { found=1 } END { exit(found ? 0 : 1) }'; then
+		echo "ok=1 iface=${route_iface} gateway=${route_gateway} ts=$(date +%s)" >/tmp/uavpal_route_diag
+		return 0
+	fi
+	if route -n 2>/dev/null | awk -v dev="$route_iface" -v gw="$route_gateway" '$1=="0.0.0.0" && $2==gw && $8==dev { found=1 } END { exit(found ? 0 : 1) }'; then
+		echo "ok=1 iface=${route_iface} gateway=${route_gateway} ts=$(date +%s)" >/tmp/uavpal_route_diag
+		return 0
+	fi
+
+	route_ok=0
+	ip route replace default via "$route_gateway" dev "$route_iface" >/dev/null 2>&1
+	if [ "$?" -eq 0 ]; then
+		route_ok=1
+	fi
+	if [ "$route_ok" -ne 1 ]; then
+		ip route del default dev "$route_iface" >/dev/null 2>&1
+		ip route add default via "$route_gateway" dev "$route_iface" >/dev/null 2>&1
+		if [ "$?" -eq 0 ]; then
+			route_ok=1
+		fi
+	fi
+	if [ "$route_ok" -ne 1 ]; then
+		route del default gw "$route_gateway" dev "$route_iface" >/dev/null 2>&1
+		route add default gw "$route_gateway" dev "$route_iface" >/dev/null 2>&1
+		if [ "$?" -eq 0 ]; then
+			route_ok=1
+		fi
+	fi
+
+	if [ "$route_ok" -eq 1 ]; then
+		echo "ok=1 iface=${route_iface} gateway=${route_gateway} ts=$(date +%s)" >/tmp/uavpal_route_diag
+		ulogger -s -t uavpal_route "... repaired default route via ${route_gateway} on ${route_iface}"
+		return 0
+	fi
+
+	echo "ok=0 iface=${route_iface} gateway=${route_gateway} ts=$(date +%s)" >/tmp/uavpal_route_diag
+	return 1
+}
+
 connect_ethernet()
 {
 	modem_if="$1"
-	dhcp_script="/tmp/uavpal_udhcpc.sh"
 
 	ulogger -s -t uavpal_connect_ethernet "... bringing up Ethernet modem interface ${modem_if}"
 	ifconfig ${modem_if} up
-	rm -f /tmp/modem_router_ip
-
-	cat >$dhcp_script <<'EOF'
-#!/bin/sh
-if [ "$1" == "bound" ] || [ "$1" == "renew" ]; then
-	ifconfig "$interface" "$ip" netmask "$subnet"
-	for router_ip in $router; do
-		ip route add default via "$router_ip" dev "$interface" 2>/dev/null
-		echo "$router_ip" >/tmp/modem_router_ip
-		break
-	done
-fi
-EOF
-	chmod +x $dhcp_script
+	echo "$modem_if" >/tmp/modem_iface
+	apply_low_latency_queues
+	rm -f /tmp/modem_router_ip /tmp/modem_gateway_ip /tmp/modem_ip
 
 	ulogger -s -t uavpal_connect_ethernet "... requesting IP address from modem's DHCP server"
-	dhcp_result=$(udhcpc -i ${modem_if} -n -t 10 -s $dhcp_script 2>&1)
+	dhcp_result=$(udhcpc -i ${modem_if} -n -t 10 2>&1)
 	if [ "$?" -ne "0" ]; then
 		ulogger -s -t uavpal_connect_ethernet "... DHCP did not complete on ${modem_if}: ${dhcp_result}"
 	fi
 
-	if [ ! -f /tmp/modem_router_ip ]; then
-		modem_ip=$(echo "$dhcp_result" | grep obtained | awk '{ print $4 }')
-		if [ "$modem_ip" != "" ]; then
-			modem_router_ip=$(echo `echo $modem_ip | cut -d '.' -f 1,2,3`.1)
-			ifconfig ${modem_if} ${modem_ip} netmask 255.255.255.0
-			ip route add default via ${modem_router_ip} dev ${modem_if} 2>/dev/null
-			echo $modem_router_ip >/tmp/modem_router_ip
+	modem_ip=$(echo "$dhcp_result" | awk '/obtained/ { print $4; exit }')
+	modem_gateway_ip=$(echo "$dhcp_result" | awk '/router/ { for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) { print $i; exit } }')
+
+	for i in $(seq 1 4); do
+		if [ -z "$modem_ip" ]; then
+			modem_ip=$(ifconfig "${modem_if}" 2>/dev/null | awk '/inet addr:/{ split($2, a, ":"); print a[2]; exit }')
+		fi
+		if [ -z "$modem_ip" ]; then
+			modem_ip=$(ifconfig "${modem_if}" 2>/dev/null | awk '/inet /{ print $2; exit }')
+		fi
+		if [ -z "$modem_gateway_ip" ]; then
+			modem_gateway_ip=$(ip route 2>/dev/null | awk -v dev="${modem_if}" '$1=="default" && $5==dev { print $3; exit }')
+		fi
+		if [ -z "$modem_gateway_ip" ]; then
+			modem_gateway_ip=$(route -n 2>/dev/null | awk -v dev="${modem_if}" '$1=="0.0.0.0" && $8==dev { print $2; exit }')
+		fi
+		if [ -n "$modem_ip" ] && [ -n "$modem_gateway_ip" ]; then
+			break
+		fi
+		sleep 1
+	done
+
+	if [ -z "$modem_gateway_ip" ] && [ -n "$modem_ip" ]; then
+		modem_gateway_ip="$(echo "$modem_ip" | cut -d '.' -f 1,2,3).1"
+	fi
+
+	if [ -n "$modem_ip" ]; then
+		ulogger -s -t uavpal_connect_ethernet "... setting ${modem_if}'s IP address to ${modem_ip}"
+		ifconfig ${modem_if} ${modem_ip} netmask 255.255.255.0
+	fi
+
+	if [ -n "$modem_gateway_ip" ]; then
+		ulogger -s -t uavpal_connect_ethernet "... setting default route via ${modem_gateway_ip}"
+		if ensure_ethernet_default_route "$modem_if" "$modem_gateway_ip"; then
+			echo "$modem_gateway_ip" >/tmp/modem_gateway_ip
+			echo "$modem_gateway_ip" >/tmp/modem_router_ip
+		else
+			ulogger -s -t uavpal_connect_ethernet "... failed to install default route via ${modem_gateway_ip} on ${modem_if}"
+			modem_gateway_ip=""
 		fi
 	fi
 
-	if [ -f /tmp/modem_router_ip ]; then
-		ulogger -s -t uavpal_connect_ethernet "... default gateway is $(cat /tmp/modem_router_ip)"
+	echo "$modem_ip" >/tmp/modem_ip
+
+	if [ -z "$modem_ip" ] || [ -z "$modem_gateway_ip" ]; then
+		ulogger -s -t uavpal_connect_ethernet "... DHCP/router detection failed on ${modem_if}"
+		return 1
 	fi
-	echo $modem_if >/tmp/modem_iface
+
+	return 0
 }
 
 connection_handler_hilink()
@@ -392,20 +547,139 @@ connection_handler_stick()
 connection_handler_ethernet()
 {
 	modem_if="$1"
+	fail_count=0
+	backoff_sec=1
+	internet_soft_fail_threshold=12
 	while true; do
+		apply_low_latency_queues
+		ensure_ethernet_default_route "$modem_if" >/dev/null 2>&1
+		check_modem_link_ethernet "$modem_if"
+		link_ok=$?
 		check_connection
-		if [ $? -ne 0 ]; then
-			ulogger -s -t uavpal_connection_handler_ethernet "... Internet connection lost, trying to reconnect"
-			killall -9 udhcpc
-			ifconfig ${modem_if} down
-			if [ -f /tmp/modem_router_ip ]; then
-				ip route del default via $(cat /tmp/modem_router_ip) 2>/dev/null
+		internet_ok=$?
+		write_reconnect_diag "ethernet" "$fail_count" "$link_ok" "$internet_ok" "$backoff_sec"
+
+		if [ "$link_ok" -eq "0" ] && [ "$internet_ok" -eq "0" ]; then
+			fail_count=0
+			backoff_sec=1
+			sleep 5
+			continue
+		fi
+
+		fail_count=$(($fail_count + 1))
+
+		if [ "$link_ok" -eq "0" ] && [ "$internet_ok" -ne "0" ] && zerotier_transport_ok; then
+			write_reconnect_diag "ethernet" "$fail_count" "$link_ok" "$internet_ok" "$backoff_sec" "internet_degraded_zt_ok"
+			if [ "$fail_count" -eq "2" ] || [ "$fail_count" -eq "$internet_soft_fail_threshold" ] || [ $(($fail_count % 12)) -eq "0" ]; then
+				ulogger -s -t uavpal_connection_handler_ethernet "... Internet check degraded, but ZeroTier is OK; keeping modem data path alive"
 			fi
-			sleep 1
-			connect_ethernet "$modem_if"
+			sleep 5
+			continue
+		fi
+
+		if [ "$link_ok" -eq "0" ] && [ "$internet_ok" -ne "0" ] && [ "$fail_count" -lt "$internet_soft_fail_threshold" ]; then
+			if [ "$fail_count" -eq "2" ]; then
+				ulogger -s -t uavpal_connection_handler_ethernet "... transient Internet check failure detected (fail_count=${fail_count}), waiting before reconnect"
+			fi
+			sleep 5
+			continue
+		fi
+
+		if [ "$link_ok" -ne "0" ] && [ "$fail_count" -lt "2" ]; then
+			sleep 5
+			continue
+		fi
+
+		ulogger -s -t uavpal_connection_handler_ethernet "... reconnecting (link_ok=${link_ok}, internet_ok=${internet_ok}, fail_count=${fail_count}, backoff=${backoff_sec}s)"
+		sleep "$backoff_sec"
+		ulogger -s -t uavpal_connection_handler_ethernet "... renewing generic Ethernet modem session"
+		killall -9 udhcpc
+		ifconfig ${modem_if} down
+		if [ -f /tmp/modem_gateway_ip ]; then
+			ip route del default via "$(cat /tmp/modem_gateway_ip)" dev ${modem_if} >/dev/null 2>&1
+		elif [ -f /tmp/modem_router_ip ]; then
+			ip route del default via "$(cat /tmp/modem_router_ip)" dev ${modem_if} >/dev/null 2>&1
+		fi
+		rm -f /tmp/modem_gateway_ip /tmp/modem_router_ip /tmp/modem_ip
+		sleep 1
+		connect_ethernet "$modem_if"
+		fail_count=0
+		backoff_sec=$(($backoff_sec * 2))
+		if [ "$backoff_sec" -gt "10" ]; then
+			backoff_sec=10
 		fi
 		sleep 5
 	done
+}
+
+write_reconnect_diag()
+{
+	diag_handler="$1"
+	diag_fail_count="$2"
+	diag_link_ok="$3"
+	diag_internet_ok="$4"
+	diag_backoff_sec="$5"
+	diag_state="$6"
+
+	if [ -z "$diag_state" ]; then
+		if [ "$diag_link_ok" -ne "0" ]; then
+			diag_state="link_down"
+		elif [ "$diag_internet_ok" -ne "0" ]; then
+			diag_state="internet_degraded"
+		elif [ "$diag_fail_count" -gt "0" ]; then
+			diag_state="recovering"
+		else
+			diag_state="ready"
+		fi
+	fi
+
+	echo "handler=${diag_handler} state=${diag_state} fail_count=${diag_fail_count} link_ok=${diag_link_ok} internet_ok=${diag_internet_ok} backoff_sec=${diag_backoff_sec} ts=$(date +%s)" >/tmp/uavpal_reconnect_diag
+}
+
+zerotier_transport_ok()
+{
+	zt_ok_nwid="$(conf_read zt_networkid)"
+	if [ -z "$zt_ok_nwid" ] || [ ! -x /data/ftp/uavpal/bin/zerotier-one ]; then
+		return 1
+	fi
+	zt_ok_line=$(/data/ftp/uavpal/bin/zerotier-one -q listnetworks 2>/dev/null | awk -v nwid="$zt_ok_nwid" '$3==nwid { print; exit }')
+	if [ -z "$zt_ok_line" ]; then
+		return 1
+	fi
+	zt_ok_state=$(echo "$zt_ok_line" | awk '{ for (i=1; i<=NF; i++) if ($i=="OK" || $i=="ACCESS_DENIED" || $i=="REQUESTING_CONFIGURATION" || $i=="NOT_FOUND" || $i=="PORT_ERROR") { print $i; exit } }')
+	zt_ok_ip=$(echo "$zt_ok_line" | awk '{ for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) { gsub(/,.*/, "", $i); print $i; exit } }')
+	if [ "$zt_ok_state" = "OK" ] && [ -n "$zt_ok_ip" ]; then
+		return 0
+	fi
+	return 1
+}
+
+check_modem_link_ethernet()
+{
+	modem_if="$1"
+	if [ -z "$modem_if" ] || [ ! -d "/proc/sys/net/ipv4/conf/${modem_if}" ]; then
+		return 1
+	fi
+
+	ifconfig "${modem_if}" 2>/dev/null | grep -q "RUNNING" || return 1
+
+	modem_link_gateway=""
+	if [ -f /tmp/modem_gateway_ip ]; then
+		modem_link_gateway=$(head -1 /tmp/modem_gateway_ip | tr -d '\r\n' | tr -d '\n')
+	elif [ -f /tmp/modem_router_ip ]; then
+		modem_link_gateway=$(head -1 /tmp/modem_router_ip | tr -d '\r\n' | tr -d '\n')
+	fi
+	if [ -z "$modem_link_gateway" ]; then
+		modem_link_gateway=$(ip route 2>/dev/null | awk -v dev="$modem_if" '$1=="default" && $5==dev {print $3; exit}')
+	fi
+	if [ -z "$modem_link_gateway" ]; then
+		modem_link_gateway=$(route -n 2>/dev/null | awk -v dev="$modem_if" '$1=="0.0.0.0" && $8==dev {print $2; exit}')
+	fi
+
+	if [ -n "$modem_link_gateway" ]; then
+		return 0
+	fi
+	return 1
 }
 
 modem_signal_from_csq()
@@ -571,16 +845,29 @@ modem_status()
 
 check_connection()
 {
-	ping_retries_per_destination=2
-	ping_destinations="8.8.8.8 192.5.5.241 199.7.83.42" # google-public-dns-a.google.com, f.root-servers.org, l.root-servers.org
-	for check in $ping_destinations; do
-		for i in $(seq 1 $ping_retries_per_destination); do
-			ping -W 5 -c 1 $check >/dev/null 2>&1
+	tcp_destinations="1.1.1.1 8.8.8.8"
+	nc_cmd=""
+	if command -v nc >/dev/null 2>&1; then
+		nc_cmd="nc"
+	elif [ -x /bin/busybox ] && /bin/busybox | grep -w nc >/dev/null 2>&1; then
+		nc_cmd="/bin/busybox nc"
+	fi
+	if [ -n "$nc_cmd" ]; then
+		for check in $tcp_destinations; do
+			$nc_cmd -w 2 "$check" 443 < /dev/null >/dev/null 2>&1
 			if [ $? -eq 0 ]; then
 				return 0
 			fi
-			sleep 1
 		done
+	fi
+
+	ping_destinations="8.8.8.8 192.5.5.241 199.7.83.42" # google-public-dns-a.google.com, f.root-servers.org, l.root-servers.org
+	for check in $ping_destinations; do
+		ping -W 2 -c 1 $check >/dev/null 2>&1
+		if [ $? -eq 0 ]; then
+			return 0
+		fi
+		sleep 1
 	done
 	# none of the ping destinations could have been reached
 	return 1

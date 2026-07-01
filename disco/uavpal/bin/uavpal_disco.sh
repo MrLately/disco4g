@@ -81,6 +81,108 @@ serial_ppp_dev="ttyUSB1"
 # functions
 . /data/ftp/uavpal/bin/uavpal_globalfunctions.sh
 
+start_zerotier_join_loop()
+{
+	zt_join_pid_file="/tmp/uavpal_zerotier_join.pid"
+	if [ -f "$zt_join_pid_file" ]; then
+		zt_join_pid=$(cat "$zt_join_pid_file" 2>/dev/null)
+		if [ -n "$zt_join_pid" ] && kill -0 "$zt_join_pid" 2>/dev/null; then
+			return 0
+		fi
+		rm -f "$zt_join_pid_file"
+	fi
+
+	(
+		for i in $(seq 1 60); do
+			ztjoin_response=$(/data/ftp/uavpal/bin/zerotier-one -q join "$(conf_read zt_networkid)" 2>&1)
+			if [ "$(echo "$ztjoin_response" | head -n1 | awk '{print $1}')" == "200" ]; then
+				ulogger -s -t uavpal_drone "... successfully joined zerotier network ID $(conf_read zt_networkid)"
+				rm -f "$zt_join_pid_file"
+				exit 0
+			fi
+			ulogger -s -t uavpal_drone "... ERROR joining zerotier network ID $(conf_read zt_networkid): $ztjoin_response - trying again"
+			sleep 2
+		done
+		rm -f "$zt_join_pid_file"
+	) >/dev/null 2>&1 &
+	echo "$!" >"$zt_join_pid_file"
+}
+
+zerotier_network_ready()
+{
+	zt_ready_nwid="$(conf_read zt_networkid)"
+	zt_ready_line=$(/data/ftp/uavpal/bin/zerotier-one -q listnetworks 2>/dev/null | awk -v nwid="$zt_ready_nwid" '$3==nwid { print; exit }')
+	if [ -z "$zt_ready_line" ]; then
+		return 1
+	fi
+	zt_ready_state=$(echo "$zt_ready_line" | awk '{ for (i=1; i<=NF; i++) if ($i=="OK" || $i=="ACCESS_DENIED" || $i=="REQUESTING_CONFIGURATION" || $i=="NOT_FOUND" || $i=="PORT_ERROR") { print $i; exit } }')
+	zt_ready_ip=$(echo "$zt_ready_line" | awk '{ for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) { gsub(/,.*/, "", $i); print $i; exit } }')
+	if [ "$zt_ready_state" = "OK" ] && [ -n "$zt_ready_ip" ]; then
+		return 0
+	fi
+	return 1
+}
+
+start_zerotier_ready_loop()
+{
+	zt_ready_pid_file="/tmp/uavpal_zerotier_ready.pid"
+	if [ -f "$zt_ready_pid_file" ]; then
+		zt_ready_pid=$(cat "$zt_ready_pid_file" 2>/dev/null)
+		if [ -n "$zt_ready_pid" ] && kill -0 "$zt_ready_pid" 2>/dev/null; then
+			return 0
+		fi
+		rm -f "$zt_ready_pid_file"
+	fi
+
+	(
+		zt_restart_done=0
+		for zt_ready_attempt in $(seq 1 30); do
+			if zerotier_network_ready; then
+				ulogger -s -t uavpal_drone "... zerotier network is ready"
+				rm -f "$zt_ready_pid_file"
+				exit 0
+			fi
+			if [ "$zt_ready_attempt" -eq "2" ] || [ $(($zt_ready_attempt % 4)) -eq "0" ]; then
+				ulogger -s -t uavpal_drone "... zerotier not ready after Internet-up; nudging network join (attempt ${zt_ready_attempt})"
+				/data/ftp/uavpal/bin/zerotier-one -q join "$(conf_read zt_networkid)" >/dev/null 2>&1
+			fi
+			if [ "$zt_ready_attempt" -ge "8" ] && [ "$zt_restart_done" -eq "0" ] && ! zerotier_network_ready; then
+				ulogger -s -t uavpal_drone "... zerotier still not ready; restarting daemon once"
+				killall -9 zerotier-one >/dev/null 2>&1
+				sleep 2
+				/data/ftp/uavpal/bin/zerotier-one -d
+				zt_restart_done=1
+			fi
+			sleep 2
+		done
+		rm -f "$zt_ready_pid_file"
+	) >/dev/null 2>&1 &
+	echo "$!" >"$zt_ready_pid_file"
+}
+
+start_zerotier_transport()
+{
+	if [ -d "/data/lib/zerotier-one/networks.d" ] && [ ! -f "/data/lib/zerotier-one/networks.d/$(conf_read zt_networkid).conf" ]; then
+		ulogger -s -t uavpal_drone "... zerotier config's network ID does not match zt_networkid config - removing zerotier data directory to allow join of new network ID"
+		rm -rf /data/lib/zerotier-one 2>/dev/null
+		mkdir -p /data/lib/zerotier-one
+		ln -s /data/ftp/uavpal/conf/local.conf /data/lib/zerotier-one/local.conf
+	fi
+
+	if ps | grep -q "[z]erotier-one"; then
+		ulogger -s -t uavpal_drone "... zerotier daemon already running"
+	else
+		ulogger -s -t uavpal_drone "... starting zerotier daemon"
+		/data/ftp/uavpal/bin/zerotier-one -d
+	fi
+
+	if [ ! -d "/data/lib/zerotier-one/networks.d" ]; then
+		ulogger -s -t uavpal_drone "... (initial-)joining zerotier network ID $(conf_read zt_networkid)"
+		start_zerotier_join_loop
+	fi
+	start_zerotier_ready_loop
+}
+
 # main
 modem_usb_id=$(detect_allowed_modem_usb_id)
 if [ "$modem_usb_id" == "" ]; then
@@ -208,6 +310,11 @@ do
 			ulogger -s -t uavpal_drone "... detected USB modem in generic Ethernet mode on ${modem_eth_if}"
 			ulogger -s -t uavpal_drone "... connecting modem to Internet (Ethernet/DHCP)"
 			connect_ethernet "$modem_eth_if"
+			if [ "$?" -ne "0" ]; then
+				ulogger -s -t uavpal_drone "... generic Ethernet setup failed on ${modem_eth_if}, waiting for modem DHCP/link"
+				usleep 100000
+				continue
+			fi
 			echo generic_ethernet >/tmp/modem_profile
 			firewall ${modem_eth_if}
 			ulogger -s -t uavpal_drone "... starting connection keep-alive handler in background"
@@ -231,19 +338,22 @@ do
 	usleep 100000
 done
 
-while true; do
-	check_connection
-	if [ $? -eq 0 ]; then
-		break # break out of loop
-	fi
-done
-ulogger -s -t uavpal_drone "... public Internet connection is up"
+internet_ready=0
+check_connection
+if [ "$?" -eq "0" ]; then
+	internet_ready=1
+	ulogger -s -t uavpal_drone "... public Internet connection is up"
+else
+	ulogger -s -t uavpal_drone "... public Internet check is degraded"
+fi
 
 ulogger -s -t uavpal_drone "... setting DNS servers statically (Google Public DNS)"
 echo -e 'nameserver 8.8.8.8\nnameserver 8.8.4.4' >/etc/resolv.conf
 
-ulogger -s -t uavpal_drone "... setting date/time using ntp"
-ntpd -n -d -q -p 0.debian.pool.ntp.org -p 1.debian.pool.ntp.org -p 2.debian.pool.ntp.org -p 3.debian.pool.ntp.org
+if [ "$internet_ready" -eq "1" ]; then
+	ulogger -s -t uavpal_drone "... setting date/time using ntp"
+	ntpd -n -d -q -p 0.debian.pool.ntp.org -p 1.debian.pool.ntp.org -p 2.debian.pool.ntp.org -p 3.debian.pool.ntp.org
+fi
 
 if [ -f /data/ftp/uavpal/conf/debug ]; then
 	debug_filename="/data/ftp/internal_000/Debug/ulog_debug_$(date +%Y%m%d%H%M%S).log"
@@ -252,33 +362,11 @@ if [ -f /data/ftp/uavpal/conf/debug ]; then
 	ulogcat -u -k -l -F debugdummy >$debug_filename &
 fi
 
+start_zerotier_transport
+
 ulogger -s -t uavpal_drone "... starting Glympse script for GPS tracking"
 /data/ftp/uavpal/bin/uavpal_glympse.sh &
 
-if [ -d "/data/lib/zerotier-one/networks.d" ] && [ ! -f "/data/lib/zerotier-one/networks.d/$(conf_read zt_networkid).conf" ]; then
-	ulogger -s -t uavpal_drone "... zerotier config's network ID does not match zt_networkid config - removing zerotier data directory to allow join of new network ID"
-	rm -rf /data/lib/zerotier-one 2>/dev/null
-	mkdir -p /data/lib/zerotier-one
-	ln -s /data/ftp/uavpal/conf/local.conf /data/lib/zerotier-one/local.conf
-fi
-
-ulogger -s -t uavpal_drone "... starting zerotier daemon"
-/data/ftp/uavpal/bin/zerotier-one -d
-
-if [ ! -d "/data/lib/zerotier-one/networks.d" ]; then
-	ulogger -s -t uavpal_drone "... (initial-)joining zerotier network ID $(conf_read zt_networkid)"
-	while true
-	do
-		ztjoin_response=`/data/ftp/uavpal/bin/zerotier-one -q join $(conf_read zt_networkid)`
-		if [ "`echo $ztjoin_response |head -n1 |awk '{print $1}')`" == "200" ]; then
-			ulogger -s -t uavpal_drone "... successfully joined zerotier network ID $(conf_read zt_networkid)"
-			break # break out of loop
-		else
-			ulogger -s -t uavpal_drone "... ERROR joining zerotier network ID $(conf_read zt_networkid): $ztjoin_response - trying again"
-			sleep 1
-		fi
-	done
-fi
 ulogger -s -t uavpal_drone "*** idle on LTE ***"
 } &
 uavpal_main_pid=$!

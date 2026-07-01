@@ -28,6 +28,9 @@ fi
 if [ -f /tmp/modem_router_ip ]; then
 	ip route del default via $(cat /tmp/modem_router_ip) 2>/dev/null
 fi
+if [ -f /tmp/modem_gateway_ip ]; then
+	ip route del default via $(cat /tmp/modem_gateway_ip) 2>/dev/null
+fi
 
 ulogger -s -t uavpal_drone "... removing temp files"
 rm -f /tmp/serial_ctrl_dev
@@ -37,10 +40,17 @@ rm -f /tmp/modem_profile
 rm -f /tmp/modem_usb_id
 rm -f /tmp/modem_provider
 rm -f /tmp/modem_iface
+rm -f /tmp/modem_ip
+rm -f /tmp/modem_gateway_ip
 rm -f /tmp/modem_router_ip
 rm -f /tmp/quectel_usbnet_mode
+rm -f /tmp/uavpal_queue_diag
+rm -f /tmp/uavpal_route_diag
+rm -f /tmp/uavpal_reconnect_diag
 rm -f /tmp/uavpal_starting
 rm -f /tmp/uavpal_delayed_fallback.pid
+rm -f /tmp/uavpal_zerotier_join.pid
+rm -f /tmp/uavpal_zerotier_ready.pid
 rm -f /tmp/uavpal_udhcpc.sh
 
 ulogger -s -t uavpal_drone "... removing lock files"
