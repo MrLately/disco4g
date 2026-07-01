@@ -1,5 +1,72 @@
 #!/bin/sh
+
+delayed_fallback_pid_file="/tmp/uavpal_delayed_fallback.pid"
+startup_guard_file="/tmp/uavpal_starting"
+
+start_delayed_fallback()
 {
+	if [ -f "$delayed_fallback_pid_file" ]; then
+		delayed_fallback_pid=$(cat "$delayed_fallback_pid_file" 2>/dev/null)
+		if [ -n "$delayed_fallback_pid" ] && kill -0 "$delayed_fallback_pid" 2>/dev/null; then
+			exit 0
+		fi
+		rm -f "$delayed_fallback_pid_file"
+	fi
+
+	(
+		. /data/ftp/uavpal/bin/uavpal_globalfunctions.sh
+
+		delayed_fallback_elapsed=0
+		while [ "$delayed_fallback_elapsed" -lt "24" ]
+		do
+			sleep 2
+			delayed_fallback_elapsed=$(($delayed_fallback_elapsed + 2))
+
+			if [ -f /tmp/modem_profile ] && ps | grep -q "[z]erotier-one"; then
+				rm -f "$delayed_fallback_pid_file"
+				exit 0
+			fi
+
+			if [ -f /tmp/uavpal_starting ]; then
+				delayed_fallback_starting_pid=$(cat /tmp/uavpal_starting 2>/dev/null)
+				if [ -n "$delayed_fallback_starting_pid" ] && kill -0 "$delayed_fallback_starting_pid" 2>/dev/null; then
+					rm -f "$delayed_fallback_pid_file"
+					exit 0
+				fi
+				rm -f /tmp/uavpal_starting
+			fi
+
+			delayed_fallback_usb_id=$(detect_allowed_modem_usb_id)
+			if [ "$delayed_fallback_usb_id" != "" ]; then
+				ulogger -s -t uavpal_drone "... delayed USB fallback detected supported modem (${delayed_fallback_usb_id}); starting modem stack"
+				/usr/bin/flock -n /tmp/lock/uavpal_disco /data/ftp/uavpal/bin/uavpal_disco.sh
+				rm -f "$delayed_fallback_pid_file"
+				exit 0
+			fi
+		done
+
+		rm -f "$delayed_fallback_pid_file"
+	) >/dev/null 2>&1 &
+	echo "$!" >"$delayed_fallback_pid_file"
+	exit 0
+}
+
+if [ "$1" = "--delayed-fallback" ]; then
+	start_delayed_fallback
+fi
+
+if [ -f "$startup_guard_file" ]; then
+	startup_guard_pid=$(cat "$startup_guard_file" 2>/dev/null)
+	if [ -n "$startup_guard_pid" ] && kill -0 "$startup_guard_pid" 2>/dev/null; then
+		ulogger -s -t uavpal_drone "... modem startup already in progress (pid ${startup_guard_pid}), ignoring duplicate USB add event"
+		exit 0
+	fi
+	rm -f "$startup_guard_file"
+fi
+echo "$$" >"$startup_guard_file"
+
+{
+trap 'rm -f /tmp/uavpal_starting' EXIT
 # exports
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/data/ftp/uavpal/lib
 
@@ -214,3 +281,6 @@ if [ ! -d "/data/lib/zerotier-one/networks.d" ]; then
 fi
 ulogger -s -t uavpal_drone "*** idle on LTE ***"
 } &
+uavpal_main_pid=$!
+echo "$uavpal_main_pid" >"$startup_guard_file"
+exit 0

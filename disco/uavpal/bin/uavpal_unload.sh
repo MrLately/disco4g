@@ -39,6 +39,8 @@ rm -f /tmp/modem_provider
 rm -f /tmp/modem_iface
 rm -f /tmp/modem_router_ip
 rm -f /tmp/quectel_usbnet_mode
+rm -f /tmp/uavpal_starting
+rm -f /tmp/uavpal_delayed_fallback.pid
 rm -f /tmp/uavpal_udhcpc.sh
 
 ulogger -s -t uavpal_drone "... removing lock files"

@@ -1,4 +1,5 @@
 ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/data/ftp/uavpal/bin/uavpal_modem_event.sh"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/data/ftp/uavpal/bin/uavpal_disco.sh --delayed-fallback"
 ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/data/ftp/uavpal/bin/uavpal_modem_event.sh"
 ACTION=="add", KERNEL=="*sd[a-z][1-4]*", SUBSYSTEM=="block", RUN+="/data/ftp/uavpal/bin/uavpal_sdcard.sh add '%E{DEVNAME}'"
 ACTION=="remove", KERNEL=="*sd[a-z][1-4]*", SUBSYSTEM=="block", RUN+="/usr/bin/flock -n /tmp/lock/uavpal_sdcard_remove /data/ftp/uavpal/bin/uavpal_sdcard.sh remove '%E{DEVNAME}'"
