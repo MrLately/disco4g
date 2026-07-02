@@ -94,6 +94,34 @@ or
 
 :warning: **Note**: the newer E3372h-**320** model does not work with the softmod currently. Some sellers on Amazon advertise the E3372h-320 as E3372h-153! 
 
+### Generic Ethernet USB modems
+Experimental support is available for USB modems that expose a normal Ethernet interface and provide DHCP. The default `disco/uavpal/conf/modem.conf` uses `auto`, which tries Ethernet first and treats non-HiLink Ethernet modems as `generic_ethernet`:
+
+```
+MODEM_PROFILE=auto
+MODEM_USB_IDS=12d1:* 19d2:* 2c7c:* 1199:* 2dee:* 05c6:* 1bc7:* 413c:* 1410:*
+MODEM_ETH_IFACE=auto
+```
+
+For another generic Ethernet modem, add its USB ID to `MODEM_USB_IDS`. `MODEM_ETH_IFACE=auto` detects USB-backed `eth*`, `usb*`, `wwan*`, and `enx*` interfaces, excluding the Disco's `eth0`.
+
+Huawei HiLink or Stick users can keep `MODEM_PROFILE=auto`, or force `MODEM_PROFILE=huawei_hilink` / `MODEM_PROFILE=huawei_stick` if needed.
+
+Generic Ethernet modems must already expose a normal DHCP Ethernet interface. APN and carrier setup is modem-side; this support does not configure APNs, QMI, MBIM, PPP, band locking, or modem provisioning for generic Ethernet modems.
+
+Proof-of-concept testing has worked with an Inseego USB8L and a Quectel RM520N-GL in ECM mode. A Quectel RM502Q-AE is expected to work if it exposes ECM and enumerates as `2c7c:*`. Quectel modules must be switched to ECM on the bench before flight testing:
+
+```
+AT+QCFG="usbnet",1
+AT+CFUN=1,1
+```
+
+Troubleshooting:
+- No modem detected: check that the modem's USB ID is listed in `MODEM_USB_IDS`.
+- Quectel detected but no Ethernet interface appears: set ECM mode with `AT+QCFG="usbnet",1`, then reboot with `AT+CFUN=1,1`.
+- Ethernet exists but there is no Internet: check the modem APN/carrier configuration and DHCP gateway.
+- Glympse signal shows `n/a`: modem status is only available through supported status paths such as USB8L `http://192.168.1.1/srv/status` or Quectel AT.
+
 - USB OTG cable (Micro USB 2.0 Male to USB 2.0 Female, ca. 15 cm, angle cable) <details><summary>**Buy now!**</summary>
    [Order from AliExpress ~US$2.00](http://s.click.aliexpress.com/e/caih4r5I) (choose "direction up")\
    [Order fom Amazon ~US$14.00](https://amzn.to/2I4SSzC) (choose 15 cm)
